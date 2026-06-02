@@ -292,6 +292,19 @@ async function applySpacesSchema(
   for (const stmt of buildCountColumns(config, { forSpaces: true })) {
     try { await target.prepare(stmt).run(); } catch { /* already exists */ }
   }
+  // Additive migrations for spaces tables on the spaces target (which may be a
+  // separate binding from the main DB). Each is try/catch'd to no-op when the
+  // column already exists. `expires_at` backs time-based blob expiry (ephemeral
+  // blobs); nullable so pre-existing rows are unaffected.
+  for (const stmt of buildSpacesMigrations(dialect)) {
+    try { await target.prepare(stmt).run(); } catch { /* already exists */ }
+  }
+}
+
+function buildSpacesMigrations(dialect: SqlDialect): string[] {
+  return [
+    `ALTER TABLE spaces_blobs ADD COLUMN expires_at ${dialect.bigintType}`,
+  ];
 }
 
 export async function initSchema(

@@ -359,6 +359,12 @@ export function registerSpacesRoutes(
       const cidString = cidToString(cid);
       const key = await blobKey(spaceUri, cidString);
 
+      const createdAt = Date.now();
+      // Ephemeral spaces stamp an absolute expiry; GC reaps purely on this and
+      // getBlob 410s past it. Permanent spaces leave expiresAt null.
+      const expiresAt =
+        blobsCfg.blobTtlMs != null ? createdAt + blobsCfg.blobTtlMs : null;
+
       await blobAdapter.put(key, bytes, { mimeType, size: bytes.byteLength });
       await adapter.putBlobMeta({
         spaceUri,
@@ -366,7 +372,8 @@ export function registerSpacesRoutes(
         mimeType,
         size: bytes.byteLength,
         authorDid: sa.issuer,
-        createdAt: Date.now(),
+        createdAt,
+        expiresAt,
       });
 
       return c.json({
@@ -408,6 +415,11 @@ export function registerSpacesRoutes(
 
       const meta = await adapter.getBlobMeta(spaceUri, cid);
       if (!meta) return c.json({ error: "NotFound" }, 404);
+      // Ephemeral blobs become inaccessible at expiry even if GC hasn't yet
+      // reaped the bytes — read-time refusal is the authoritative cut-off.
+      if (meta.expiresAt != null && meta.expiresAt <= Date.now()) {
+        return c.json({ error: "Gone", reason: "expired" }, 410);
+      }
       const key = await blobKey(spaceUri, cid);
       const bytes = await blobAdapter.get(key);
       if (!bytes) return c.json({ error: "NotFound" }, 404);

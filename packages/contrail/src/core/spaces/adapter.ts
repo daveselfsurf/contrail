@@ -74,6 +74,7 @@ function mapBlobMetaRow(row: any): BlobMetaRow {
     size: Number(row.size),
     authorDid: row.author_did,
     createdAt: toNum(row.created_at),
+    expiresAt: row.expires_at == null ? null : toNum(row.expires_at),
   };
 }
 
@@ -617,12 +618,20 @@ export class HostedAdapter implements StorageAdapter {
   }
 
   async putBlobMeta(row: BlobMetaRow): Promise<void> {
-    const sql = `INSERT INTO spaces_blobs (space_uri, cid, mime_type, size, author_did, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+    const sql = `INSERT INTO spaces_blobs (space_uri, cid, mime_type, size, author_did, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (space_uri, cid) DO NOTHING`;
     await this.db
       .prepare(sql)
-      .bind(row.spaceUri, row.cid, row.mimeType, row.size, row.authorDid, row.createdAt)
+      .bind(
+        row.spaceUri,
+        row.cid,
+        row.mimeType,
+        row.size,
+        row.authorDid,
+        row.createdAt,
+        row.expiresAt ?? null
+      )
       .run();
   }
 
@@ -724,5 +733,26 @@ export class HostedAdapter implements StorageAdapter {
       if (!referenced) orphans.push(blob);
     }
     return orphans;
+  }
+
+  async findExpiredBlobs(
+    spaceUri: string,
+    now: number,
+    limit: number
+  ): Promise<BlobMetaRow[]> {
+    // Pure time-based reaping for ephemeral blobs: any blob whose expires_at
+    // has passed is eligible, regardless of whether it's still referenced by a
+    // record. Rows with NULL expires_at (permanent blobs) are never returned
+    // here — those go through findOrphanBlobs instead.
+    const { results } = await this.db
+      .prepare(
+        `SELECT * FROM spaces_blobs
+         WHERE space_uri = ? AND expires_at IS NOT NULL AND expires_at <= ?
+         ORDER BY expires_at ASC
+         LIMIT ?`
+      )
+      .bind(spaceUri, now, limit)
+      .all<any>();
+    return results.map(mapBlobMetaRow);
   }
 }

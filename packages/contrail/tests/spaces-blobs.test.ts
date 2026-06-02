@@ -8,13 +8,17 @@ import { resolveConfig } from "../src/core/types";
 import type { ContrailConfig } from "../src/core/types";
 import { MemoryBlobAdapter } from "../src/core/spaces/blob-adapter";
 import { HostedAdapter } from "../src/core/spaces/adapter";
-import { gcOrphanBlobs } from "../src/core/spaces/blob-gc";
+import { gcOrphanBlobs, gcExpiredBlobs } from "../src/core/spaces/blob-gc";
 
 const ALICE = "did:plc:alice";
 const BOB = "did:plc:bob";
 const CHARLIE = "did:plc:charlie";
 
-function makeConfig(blobs: MemoryBlobAdapter, maxSize = 2 * 1024 * 1024): ContrailConfig {
+function makeConfig(
+  blobs: MemoryBlobAdapter,
+  maxSize = 2 * 1024 * 1024,
+  blobTtlMs?: number
+): ContrailConfig {
   return {
     namespace: "test.blobs",
     collections: {
@@ -23,7 +27,7 @@ function makeConfig(blobs: MemoryBlobAdapter, maxSize = 2 * 1024 * 1024): Contra
     spaces: {
       type: "tools.atmo.event.space",
       serviceDid: "did:web:test.example#svc",
-      blobs: { adapter: blobs, maxSize },
+      blobs: { adapter: blobs, maxSize, blobTtlMs },
     },
   };
 }
@@ -44,10 +48,11 @@ function fakeAuth(aud: string): MiddlewareHandler {
 
 async function makeApp(
   blobs: MemoryBlobAdapter,
-  maxSize = 2 * 1024 * 1024
+  maxSize = 2 * 1024 * 1024,
+  blobTtlMs?: number
 ): Promise<{ app: Hono; db: any; config: ReturnType<typeof resolveConfig> }> {
   const db = createSqliteDatabase(":memory:");
-  const cfg = makeConfig(blobs, maxSize);
+  const cfg = makeConfig(blobs, maxSize, blobTtlMs);
   const resolved = resolveConfig(cfg);
   await initSchema(db, resolved);
   const app = createApp(db, resolved, {
@@ -321,5 +326,141 @@ describe("spaces blobs", () => {
       ALICE
     );
     expect(missRes.status).toBe(404);
+  });
+});
+
+describe("ephemeral (TTL) blobs", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  async function uploadBlob(
+    app: Hono,
+    uri: string,
+    did: string,
+    text: string
+  ): Promise<string> {
+    const up = await call(
+      app,
+      "POST",
+      `/xrpc/test.blobs.space.uploadBlob?spaceUri=${encodeURIComponent(uri)}`,
+      did,
+      new TextEncoder().encode(text),
+      "image/png"
+    );
+    expect(up.status).toBe(200);
+    const { blob } = (await up.json()) as any;
+    return blob.ref.$link;
+  }
+
+  it("stamps expires_at = createdAt + blobTtlMs on upload", async () => {
+    const blobs = new MemoryBlobAdapter();
+    const { app, db } = await makeApp(blobs, 2 * 1024 * 1024, DAY_MS);
+    const uri = await createSpace(app, ALICE, "ephemeral");
+
+    const before = Date.now();
+    const cid = await uploadBlob(app, uri, ALICE, "ephemeral bytes");
+    const after = Date.now();
+
+    const storage = new HostedAdapter(db, makeConfig(blobs, 2 * 1024 * 1024, DAY_MS));
+    const meta = await storage.getBlobMeta(uri, cid);
+    expect(meta).not.toBeNull();
+    expect(meta!.expiresAt).not.toBeNull();
+    // expires_at should sit within [before+ttl, after+ttl].
+    expect(meta!.expiresAt!).toBeGreaterThanOrEqual(before + DAY_MS);
+    expect(meta!.expiresAt!).toBeLessThanOrEqual(after + DAY_MS);
+  });
+
+  it("getBlob returns 410 once the blob has expired (even if bytes still exist)", async () => {
+    const blobs = new MemoryBlobAdapter();
+    // 1ms TTL → expired almost immediately.
+    const { app } = await makeApp(blobs, 2 * 1024 * 1024, 1);
+    const uri = await createSpace(app, ALICE, "expired");
+    const cid = await uploadBlob(app, uri, ALICE, "soon gone");
+
+    // Wait past the TTL. Bytes are still in the MemoryBlobAdapter — only the
+    // read-time expiry check should make this 410, not a missing-bytes 404.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(blobs.size()).toBeGreaterThan(0);
+
+    const res = await call(
+      app,
+      "GET",
+      `/xrpc/test.blobs.space.getBlob?spaceUri=${encodeURIComponent(uri)}&cid=${cid}`,
+      ALICE
+    );
+    expect(res.status).toBe(410);
+    const body = (await res.json()) as any;
+    expect(body.reason).toBe("expired");
+  });
+
+  it("getBlob still serves a not-yet-expired ephemeral blob", async () => {
+    const blobs = new MemoryBlobAdapter();
+    const { app } = await makeApp(blobs, 2 * 1024 * 1024, DAY_MS);
+    const uri = await createSpace(app, ALICE, "fresh");
+    const cid = await uploadBlob(app, uri, ALICE, "still fresh");
+
+    const res = await call(
+      app,
+      "GET",
+      `/xrpc/test.blobs.space.getBlob?spaceUri=${encodeURIComponent(uri)}&cid=${cid}`,
+      ALICE
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("gcExpiredBlobs deletes expired blobs EVEN IF still referenced, keeps unexpired", async () => {
+    const blobs = new MemoryBlobAdapter();
+    const { app, db } = await makeApp(blobs, 2 * 1024 * 1024, DAY_MS);
+    const uri = await createSpace(app, ALICE, "gc-ttl");
+    const storage = new HostedAdapter(db, makeConfig(blobs, 2 * 1024 * 1024, DAY_MS));
+
+    // Upload a blob and reference it from a record (so orphan-GC would KEEP it).
+    const cid = await uploadBlob(app, uri, ALICE, "expired-but-referenced");
+    const put = await callJson(app, "POST", "/xrpc/test.blobs.space.putRecord", ALICE, {
+      spaceUri: uri,
+      collection: "app.event.photo",
+      record: {
+        caption: "ref",
+        image: { $type: "blob", ref: { $link: cid }, mimeType: "image/png", size: 22 },
+      },
+    });
+    expect(put.status).toBe(200);
+
+    // GC with `now` well past the 24h TTL → the referenced blob IS reaped
+    // (time-based, unlike orphan GC which would spare a referenced blob).
+    const result = await gcExpiredBlobs(storage, blobs, uri, { now: Date.now() + 2 * DAY_MS });
+    expect(result.deleted).toBe(1);
+    expect(result.cids).toContain(cid);
+
+    // Bytes + meta gone; getBlob now 404s (meta deleted).
+    expect((await storage.getBlobMeta(uri, cid))).toBeNull();
+
+    // A fresh upload is NOT reaped when now is before its expiry.
+    const freshCid = await uploadBlob(app, uri, ALICE, "fresh");
+    const result2 = await gcExpiredBlobs(storage, blobs, uri, { now: Date.now() });
+    expect(result2.deleted).toBe(0);
+    expect((await storage.getBlobMeta(uri, freshCid))).not.toBeNull();
+  });
+
+  it("non-ephemeral (no blobTtlMs) blobs have null expiresAt and never 410", async () => {
+    const blobs = new MemoryBlobAdapter();
+    const { app, db } = await makeApp(blobs); // no TTL
+    const uri = await createSpace(app, ALICE, "permanent");
+    const cid = await uploadBlob(app, uri, ALICE, "forever");
+
+    const storage = new HostedAdapter(db, makeConfig(blobs));
+    const meta = await storage.getBlobMeta(uri, cid);
+    expect(meta!.expiresAt ?? null).toBeNull();
+
+    // gcExpiredBlobs never reaps a null-expiry blob, even far in the future.
+    const result = await gcExpiredBlobs(storage, blobs, uri, { now: Date.now() + 1000 * DAY_MS });
+    expect(result.deleted).toBe(0);
+
+    const res = await call(
+      app,
+      "GET",
+      `/xrpc/test.blobs.space.getBlob?spaceUri=${encodeURIComponent(uri)}&cid=${cid}`,
+      ALICE
+    );
+    expect(res.status).toBe(200);
   });
 });

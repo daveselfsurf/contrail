@@ -20,6 +20,12 @@ export interface SpacesBlobsConfig {
    *  GC can delete them, to allow upload-then-putRecord flows.
    *  Defaults to 24 hours. */
   gcOrphanAfterMs?: number;
+  /** When set, blobs are **ephemeral**: each upload is stamped with
+   *  `expires_at = createdAt + blobTtlMs`, GC deletes purely on `expires_at`
+   *  (regardless of whether the blob is still referenced), and `getBlob`
+   *  returns 410 once expired. When unset, blobs are permanent and GC falls
+   *  back to the orphan-based reaping above. */
+  blobTtlMs?: number;
 }
 
 export const DEFAULT_BLOB_MAX_SIZE = 2 * 1024 * 1024;
@@ -132,6 +138,10 @@ export interface BlobMetaRow {
   size: number;
   authorDid: string;
   createdAt: number;
+  /** Absolute expiry (ms epoch) for ephemeral blobs, or null for permanent
+   *  blobs. When set, GC reaps the blob once `now >= expiresAt` and `getBlob`
+   *  returns 410. */
+  expiresAt?: number | null;
 }
 
 export interface ListBlobsOptions {
@@ -192,6 +202,10 @@ export interface StorageAdapter {
   /** Find blob rows older than `cutoff` whose CIDs are not referenced in any
    *  record JSON in this space. Capped at `limit` to bound a single GC pass. */
   findOrphanBlobs(spaceUri: string, cutoff: number, limit: number): Promise<BlobMetaRow[]>;
+  /** Find **ephemeral** blob rows whose `expires_at <= now`, regardless of
+   *  whether they're still referenced. Backs time-based (TTL) blob expiry.
+   *  Capped at `limit` to bound a single GC pass. */
+  findExpiredBlobs(spaceUri: string, now: number, limit: number): Promise<BlobMetaRow[]>;
 }
 
 export interface AdapterContext {

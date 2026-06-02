@@ -41,10 +41,12 @@ export function buildSpacesBaseSchema(dialect: SqlDialect): string[] {
       size       INTEGER NOT NULL,
       author_did TEXT NOT NULL,
       created_at ${dialect.bigintType} NOT NULL,
+      expires_at ${dialect.bigintType},
       PRIMARY KEY (space_uri, cid)
     )`,
     `CREATE INDEX IF NOT EXISTS idx_spaces_blobs_author ON spaces_blobs(space_uri, author_did)`,
     `CREATE INDEX IF NOT EXISTS idx_spaces_blobs_created ON spaces_blobs(space_uri, created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_spaces_blobs_expires ON spaces_blobs(space_uri, expires_at)`,
 
     `CREATE TABLE IF NOT EXISTS spaces_invites (
       token_hash TEXT PRIMARY KEY,

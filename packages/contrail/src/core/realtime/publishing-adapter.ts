@@ -60,6 +60,7 @@ export function wrapWithPublishing(
     listBlobMeta: inner.listBlobMeta.bind(inner),
     deleteBlobMeta: inner.deleteBlobMeta.bind(inner),
     findOrphanBlobs: inner.findOrphanBlobs.bind(inner),
+    findExpiredBlobs: inner.findExpiredBlobs.bind(inner),
 
     async addMember(spaceUri, did, addedBy) {
       await inner.addMember(spaceUri, did, addedBy);
