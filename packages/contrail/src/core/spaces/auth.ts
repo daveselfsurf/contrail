@@ -93,6 +93,83 @@ export function createServiceAuthMiddleware(
   };
 }
 
+/** Constant-time string compare to avoid leaking the secret via timing. */
+function timingSafeEqual(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  // Always compare against a fixed-length buffer so length itself doesn't
+  // short-circuit; mismatched lengths still fail.
+  let diff = ab.length ^ bb.length;
+  const len = Math.max(ab.length, bb.length);
+  for (let i = 0; i < len; i++) {
+    diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  }
+  return diff === 0;
+}
+
+/** Header names for the trusted-gateway auth path. */
+export const TRUSTED_GATEWAY_SECRET_HEADER = "x-contrail-gateway-secret";
+export const TRUSTED_GATEWAY_DID_HEADER = "x-contrail-gateway-did";
+
+/** Hono middleware for a **trusted gateway** caller.
+ *
+ *  Use when another first-party service (which has already authenticated the
+ *  end user) calls contrail over HTTP on the user's behalf, and you trust that
+ *  service. The caller presents a shared secret and asserts the acting user's
+ *  DID; contrail treats that DID as the `serviceAuth.issuer`.
+ *
+ *  This is the network-boundary analogue of the in-process marker: the
+ *  in-process path (WeakMap on Request identity) cannot cross a process/network
+ *  boundary, so a cross-process trusted caller authenticates with a shared
+ *  secret instead. The trust boundary is the gateway service, not the PDS — so
+ *  only enable this for callers you operate. For zero-trust / federated callers,
+ *  use the service-auth JWT path (`createServiceAuthMiddleware`) instead.
+ *
+ *  Precedence: in-process marker → shared-secret gateway. Requests without the
+ *  gateway secret fall through to 401 (this middleware does not also accept
+ *  JWTs; compose explicitly if you need both). */
+export function createTrustedGatewayMiddleware(sharedSecret: string): MiddlewareHandler {
+  if (!sharedSecret) {
+    throw new Error("createTrustedGatewayMiddleware: sharedSecret must be non-empty");
+  }
+  return async (c, next) => {
+    const lxm = extractLxmFromPath(c);
+
+    const inProcess = readInProcess(c.req.raw);
+    if (inProcess) {
+      c.set("serviceAuth", {
+        issuer: inProcess.did,
+        audience: "",
+        lxm: lxm ?? undefined,
+      } satisfies ServiceAuth);
+      await next();
+      return;
+    }
+
+    const presented = c.req.header(TRUSTED_GATEWAY_SECRET_HEADER);
+    if (!presented || !timingSafeEqual(presented, sharedSecret)) {
+      return c.json({ error: "AuthRequired", message: "Invalid gateway credentials" }, 401);
+    }
+
+    const did = c.req.header(TRUSTED_GATEWAY_DID_HEADER);
+    if (!did || !did.startsWith("did:")) {
+      return c.json(
+        { error: "AuthRequired", message: `Missing or invalid ${TRUSTED_GATEWAY_DID_HEADER}` },
+        401
+      );
+    }
+
+    c.set("serviceAuth", {
+      issuer: did,
+      audience: "",
+      lxm: lxm ?? undefined,
+    } satisfies ServiceAuth);
+
+    await next();
+  };
+}
+
 function extractLxmFromPath(c: Context): Nsid | null {
   const path = new URL(c.req.url).pathname;
   const match = path.match(/\/xrpc\/([a-zA-Z0-9.-]+)/);
