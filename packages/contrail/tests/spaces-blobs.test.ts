@@ -463,4 +463,49 @@ describe("ephemeral (TTL) blobs", () => {
     );
     expect(res.status).toBe(200);
   });
+
+  it("listBlobs hides expired ephemeral blobs (consistent with getBlob 410)", async () => {
+    const blobs = new MemoryBlobAdapter();
+    const { app } = await makeApp(blobs, 2 * 1024 * 1024, 1); // 1ms TTL
+    const uri = await createSpace(app, ALICE, "list-expired");
+    await uploadBlob(app, uri, ALICE, "will expire");
+
+    await new Promise((r) => setTimeout(r, 10)); // past TTL
+
+    const res = await call(
+      app,
+      "GET",
+      `/xrpc/test.blobs.space.listBlobs?spaceUri=${encodeURIComponent(uri)}`,
+      ALICE
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    // The expired blob must not appear — a listed CID must be fetchable.
+    expect(body.blobs.length).toBe(0);
+  });
+
+  it("re-uploading the same CID refreshes the expiry (keep-alive)", async () => {
+    const blobs = new MemoryBlobAdapter();
+    const { app, db } = await makeApp(blobs, 2 * 1024 * 1024, DAY_MS);
+    const uri = await createSpace(app, ALICE, "reupload");
+    const storage = new HostedAdapter(db, makeConfig(blobs, 2 * 1024 * 1024, DAY_MS));
+
+    const cid = await uploadBlob(app, uri, ALICE, "same bytes");
+    const first = (await storage.getBlobMeta(uri, cid))!.expiresAt!;
+
+    // Wait a beat, then re-upload identical bytes (same CID).
+    await new Promise((r) => setTimeout(r, 5));
+    const cid2 = await uploadBlob(app, uri, ALICE, "same bytes");
+    expect(cid2).toBe(cid); // content-addressed → identical CID
+    const second = (await storage.getBlobMeta(uri, cid))!.expiresAt!;
+
+    // Expiry advanced (refreshed from the later upload).
+    expect(second).toBeGreaterThan(first);
+  });
+
+  it("rejects a non-positive blobTtlMs at setup", async () => {
+    const blobs = new MemoryBlobAdapter();
+    await expect(makeApp(blobs, 2 * 1024 * 1024, 0)).rejects.toThrow();
+    await expect(makeApp(blobs, 2 * 1024 * 1024, -5)).rejects.toThrow();
+  });
 });

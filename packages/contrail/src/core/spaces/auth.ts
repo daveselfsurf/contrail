@@ -93,24 +93,39 @@ export function createServiceAuthMiddleware(
   };
 }
 
-/** Constant-time string compare to avoid leaking the secret via timing. */
-function timingSafeEqual(a: string, b: string): boolean {
+/** Constant-time secret compare with no length leak.
+ *
+ *  We compare SHA-256 digests of both inputs rather than the raw bytes: the
+ *  digests are always 32 bytes, so neither the comparison length nor the
+ *  number of loop iterations depends on the (attacker-controlled) presented
+ *  value's length. The final fixed-length XOR-accumulate is constant-time. This
+ *  matches the WebCrypto-based pattern used elsewhere in contrail (invite/token,
+ *  blob-adapter) rather than reinventing a byte loop. */
+async function secretEquals(presented: string, expected: string): Promise<boolean> {
   const enc = new TextEncoder();
-  const ab = enc.encode(a);
-  const bb = enc.encode(b);
-  // Always compare against a fixed-length buffer so length itself doesn't
-  // short-circuit; mismatched lengths still fail.
-  let diff = ab.length ^ bb.length;
-  const len = Math.max(ab.length, bb.length);
-  for (let i = 0; i < len; i++) {
-    diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
-  }
+  const [pa, pb] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(presented)),
+    crypto.subtle.digest("SHA-256", enc.encode(expected)),
+  ]);
+  const a = new Uint8Array(pa);
+  const b = new Uint8Array(pb);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
   return diff === 0;
 }
 
 /** Header names for the trusted-gateway auth path. */
 export const TRUSTED_GATEWAY_SECRET_HEADER = "x-contrail-gateway-secret";
 export const TRUSTED_GATEWAY_DID_HEADER = "x-contrail-gateway-did";
+
+/** Minimal DID shape check: `did:<method>:<method-specific-id>` with non-empty
+ *  method and id segments. Not a full DID-syntax validator — just enough to
+ *  reject obviously malformed principals like "did:" or "did:plc:" before we
+ *  trust them as an issuer. */
+function isPlausibleDid(value: string): boolean {
+  const parts = value.split(":");
+  return parts.length >= 3 && parts[0] === "did" && parts[1]!.length > 0 && parts[2]!.length > 0;
+}
 
 /** Hono middleware for a **trusted gateway** caller.
  *
@@ -148,12 +163,12 @@ export function createTrustedGatewayMiddleware(sharedSecret: string): Middleware
     }
 
     const presented = c.req.header(TRUSTED_GATEWAY_SECRET_HEADER);
-    if (!presented || !timingSafeEqual(presented, sharedSecret)) {
+    if (!presented || !(await secretEquals(presented, sharedSecret))) {
       return c.json({ error: "AuthRequired", message: "Invalid gateway credentials" }, 401);
     }
 
     const did = c.req.header(TRUSTED_GATEWAY_DID_HEADER);
-    if (!did || !did.startsWith("did:")) {
+    if (!did || !isPlausibleDid(did)) {
       return c.json(
         { error: "AuthRequired", message: `Missing or invalid ${TRUSTED_GATEWAY_DID_HEADER}` },
         401

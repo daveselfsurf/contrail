@@ -20,11 +20,16 @@ export interface SpacesBlobsConfig {
    *  GC can delete them, to allow upload-then-putRecord flows.
    *  Defaults to 24 hours. */
   gcOrphanAfterMs?: number;
-  /** When set, blobs are **ephemeral**: each upload is stamped with
-   *  `expires_at = createdAt + blobTtlMs`, GC deletes purely on `expires_at`
-   *  (regardless of whether the blob is still referenced), and `getBlob`
-   *  returns 410 once expired. When unset, blobs are permanent and GC falls
-   *  back to the orphan-based reaping above. */
+  /** When set (and > 0), blobs are **ephemeral**: each upload is stamped with
+   *  `expires_at = createdAt + blobTtlMs`, GC (`gcExpiredBlobs`) deletes purely
+   *  on `expires_at` regardless of whether the blob is still referenced,
+   *  `getBlob` returns 410 once expired, and `listBlobs` hides expired blobs.
+   *  Re-uploading the same CID **refreshes** the expiry (the TTL window
+   *  restarts from the latest upload), so re-sharing keeps a blob alive.
+   *  When unset, blobs are permanent and GC falls back to the orphan-based
+   *  reaping above. A value <= 0 is rejected at config resolution (an
+   *  always-expired store is almost certainly a misconfiguration; use the
+   *  permanent mode or a small positive TTL instead). */
   blobTtlMs?: number;
 }
 

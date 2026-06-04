@@ -308,6 +308,13 @@ export function registerSpacesRoutes(
     const blobAdapter = blobsCfg.adapter;
     const maxSize = blobsCfg.maxSize ?? DEFAULT_BLOB_MAX_SIZE;
     const accept = blobsCfg.accept;
+    // Reject a non-positive TTL: a zero/negative value would make every blob
+    // expire on (or before) upload, which is almost always a misconfiguration.
+    if (blobsCfg.blobTtlMs != null && blobsCfg.blobTtlMs <= 0) {
+      throw new Error(
+        `spaces.blobs.blobTtlMs must be > 0 (got ${blobsCfg.blobTtlMs}); omit it for permanent blobs`
+      );
+    }
 
     app.post(`/xrpc/${SPACE}.uploadBlob`, auth, async (c) => {
       const sa = getAuth(c);

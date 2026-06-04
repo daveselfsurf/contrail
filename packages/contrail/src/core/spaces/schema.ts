@@ -46,7 +46,10 @@ export function buildSpacesBaseSchema(dialect: SqlDialect): string[] {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_spaces_blobs_author ON spaces_blobs(space_uri, author_did)`,
     `CREATE INDEX IF NOT EXISTS idx_spaces_blobs_created ON spaces_blobs(space_uri, created_at)`,
-    `CREATE INDEX IF NOT EXISTS idx_spaces_blobs_expires ON spaces_blobs(space_uri, expires_at)`,
+    // NOTE: idx_spaces_blobs_expires is created in the migration loop
+    // (buildSpacesMigrations), NOT here — on an in-place upgrade the
+    // expires_at column doesn't exist yet when this base batch runs, so the
+    // index must wait until after the ALTER TABLE ADD COLUMN migration.
 
     `CREATE TABLE IF NOT EXISTS spaces_invites (
       token_hash TEXT PRIMARY KEY,

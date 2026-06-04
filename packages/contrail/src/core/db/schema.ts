@@ -293,17 +293,22 @@ async function applySpacesSchema(
     try { await target.prepare(stmt).run(); } catch { /* already exists */ }
   }
   // Additive migrations for spaces tables on the spaces target (which may be a
-  // separate binding from the main DB). Each is try/catch'd to no-op when the
-  // column already exists. `expires_at` backs time-based blob expiry (ephemeral
-  // blobs); nullable so pre-existing rows are unaffected.
+  // separate binding from the main DB). Each is try/catch'd to no-op when it
+  // was already applied. Statements are ORDER-SENSITIVE within this loop: the
+  // ADD COLUMN must precede the index that references it. On a fresh DB the
+  // CREATE TABLE already has expires_at, so the ALTER no-ops (caught) and the
+  // index still gets created; on an in-place upgrade the ALTER adds the column
+  // first, then the index succeeds. `expires_at` is nullable so pre-existing
+  // rows are unaffected.
   for (const stmt of buildSpacesMigrations(dialect)) {
-    try { await target.prepare(stmt).run(); } catch { /* already exists */ }
+    try { await target.prepare(stmt).run(); } catch { /* already applied */ }
   }
 }
 
 function buildSpacesMigrations(dialect: SqlDialect): string[] {
   return [
     `ALTER TABLE spaces_blobs ADD COLUMN expires_at ${dialect.bigintType}`,
+    `CREATE INDEX IF NOT EXISTS idx_spaces_blobs_expires ON spaces_blobs(space_uri, expires_at)`,
   ];
 }
 

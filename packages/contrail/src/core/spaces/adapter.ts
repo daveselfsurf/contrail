@@ -618,9 +618,15 @@ export class HostedAdapter implements StorageAdapter {
   }
 
   async putBlobMeta(row: BlobMetaRow): Promise<void> {
+    // Re-uploading the same CID (identical bytes → same content address)
+    // refreshes the expiry: the blob backend overwrites the bytes, so the TTL
+    // window restarts from this upload. This makes "re-share to keep alive"
+    // work for ephemeral blobs. For permanent blobs expires_at is NULL on both
+    // sides, so this is a no-op. created_at is preserved (DO NOTHING for it via
+    // omission — we only touch expires_at).
     const sql = `INSERT INTO spaces_blobs (space_uri, cid, mime_type, size, author_did, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (space_uri, cid) DO NOTHING`;
+       ON CONFLICT (space_uri, cid) DO UPDATE SET expires_at = excluded.expires_at`;
     await this.db
       .prepare(sql)
       .bind(
@@ -654,6 +660,11 @@ export class HostedAdapter implements StorageAdapter {
       clauses.push("author_did = ?");
       params.push(options.byUser);
     }
+    // Hide expired ephemeral blobs so listings stay consistent with getBlob's
+    // read-time 410 (a CID a client sees here is fetchable). Permanent blobs
+    // (NULL expires_at) always pass.
+    clauses.push("(expires_at IS NULL OR expires_at > ?)");
+    params.push(Date.now());
     if (options.cursor) {
       clauses.push("created_at < ?");
       params.push(Number(options.cursor));
