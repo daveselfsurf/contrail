@@ -14,7 +14,7 @@
 		{
 			"binding": "DB",
 			"database_name": "wumblr-eimg",
-			"database_id": "REPLACE_WITH_D1_ID"
+			"database_id": "0b1a23aa-0c20-45e2-ab11-3b6d976fea53"
 		}
 	],
 	// R2 holds the ciphertext bytes. Create with:
