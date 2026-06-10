@@ -1,0 +1,35 @@
+{
+	// wumblr ephemeral encrypted image (eimg) spaces worker — a blind ciphertext
+	// store behind freeq's /api/v1/eimg. See src/worker.ts.
+	"name": "wumblr-eimg-spaces",
+	"main": "src/worker.ts",
+	"compatibility_date": "2025-12-25",
+	"observability": {
+		"enabled": true
+	},
+	// D1 holds spaces metadata (spaces_blobs, spaces_members, …). Create with:
+	//   wrangler d1 create wumblr-eimg
+	// then paste the returned database_id below.
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "wumblr-eimg",
+			"database_id": "REPLACE_WITH_D1_ID"
+		}
+	],
+	// R2 holds the ciphertext bytes. Create with:
+	//   wrangler r2 bucket create wumblr-eimg
+	// and add a 24h object-lifecycle (delete) rule as an independent backstop.
+	"r2_buckets": [
+		{
+			"binding": "BLOBS",
+			"bucket_name": "wumblr-eimg"
+		}
+	],
+	// Reap expired blobs every minute (belt-and-suspenders with R2 lifecycle).
+	"triggers": {
+		"crons": ["*/1 * * * *"]
+	}
+	// EIMG_GATEWAY_SECRET is set as a secret, NOT here:
+	//   wrangler secret put EIMG_GATEWAY_SECRET
+}

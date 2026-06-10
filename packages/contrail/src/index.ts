@@ -64,6 +64,23 @@ export {
 export type { BlobAdapter, BlobUploadMeta, R2BucketLike } from "./core/spaces/blob-adapter";
 export type { SpacesBlobsConfig, BlobMetaRow } from "./core/spaces/types";
 
+// Ephemeral-blob GC (time-based reaper) — for a deployment's scheduled handler.
+export { gcExpiredBlobs, gcOrphanBlobs } from "./core/spaces/blob-gc";
+export type {
+  ExpiredBlobGcOptions,
+  BlobGcOptions,
+  BlobGcResult,
+} from "./core/spaces/blob-gc";
+
+// Trusted-gateway auth — for a first-party service (e.g. freeq) calling spaces
+// over HTTP with a shared secret + asserted user DID.
+export {
+  createTrustedGatewayMiddleware,
+  TRUSTED_GATEWAY_SECRET_HEADER,
+  TRUSTED_GATEWAY_DID_HEADER,
+} from "./core/spaces/auth";
+// (SpaceRow / StorageAdapter / ListSpacesOptions are already exported above.)
+
 // Realtime
 export type {
   PubSub,
